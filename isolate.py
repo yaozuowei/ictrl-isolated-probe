@@ -23,6 +23,17 @@ for path in files:
     after = after.replace('string ictrl"', 'string hc-ictrl-probe"')
     after = after.replace('_ictrl._tcp', '_hcprobe._tcp')
     after = re.sub(r'\b8200\b', '18201', after)
+    if path.name == 'Makefile':
+        anchor = '\tSDK="$$(xcrun --sdk iphoneos --show-sdk-path)"; \\\n'
+        assert after.count(anchor) == 1
+        # Xcode 16.4's runner does not import this newer-Xcode symbol.
+        # Inspect successfully before skipping; tool failures must fail the build.
+        guard = ('\tUNDEFINED="$$(nm -u "$$APP/$(RUNNER_BIN)")"; \\\n'
+                 '\tif ! printf "%s\\n" "$$UNDEFINED" | grep -Fq \'_OBJC_CLASS_$$_XCTCommandLineToolHelper\'; then \\\n'
+                 '\t\techo "Runner does not import compat symbol; shim not needed"; \\\n'
+                 '\t\texit 0; \\\n'
+                 '\tfi; \\\n')
+        after = after.replace(anchor, guard + anchor)
     if path.name == 'project.yml':
         after = after.replace('GENERATE_INFOPLIST_FILE: YES', 'GENERATE_INFOPLIST_FILE: YES\n        INFOPLIST_KEY_CFBundleDisplayName: "iCTRL Probe"')
         # The upstream clients persist state in ~/.ictrl and default to the live
