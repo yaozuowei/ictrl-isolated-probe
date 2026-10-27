@@ -1,5 +1,5 @@
     /// Experimental, Safari-only single action. Never schedules a touch sequence.
-    private func probeGuardedTap(_ cmd: ActionCommand) -> ([String: JSONValue]?, JSONRPCError?) {
+    private func probeGuardedTap(_ cmd: ActionCommand, monotonicDeadline: TimeInterval? = nil) -> ([String: JSONValue]?, JSONRPCError?) {
         let began = nowMonotonic
         func reply(_ state: String, _ reason: String) -> ([String: JSONValue]?, JSONRPCError?) {
             return (["state": .string(state), "reason": .string(reason),
@@ -11,6 +11,7 @@
             return reply("stopped", "invalid_request")
         }
         func deadlineValid() -> Bool {
+            if let end = monotonicDeadline, nowMonotonic >= end { return false }
             let remaining = deadline - Date().timeIntervalSince1970 * 1000
             return remaining > 0 && remaining <= 5000
         }
@@ -64,5 +65,37 @@
                  "check_ms": .int(Int((beforeTouch - began) * 1000)),
                  "touch_ms": .int(Int((nowMonotonic - beforeTouch) * 1000)),
                  "elapsed_ms": .int(Int((nowMonotonic - began) * 1000))], nil)
+    }
+
+    /// A short native experiment, not a background ticket task or a touch batch.
+    /// Every iteration takes a new snapshot and rechecks all single-tap guards.
+    private func probeGuardedRun(_ cmd: ActionCommand) -> ([String: JSONValue]?, JSONRPCError?) {
+        let began = nowMonotonic
+        let end = began + 3
+        var single = cmd
+        // Server-local clocks avoid the PC/phone wall-clock offset. The monotonic
+        // deadline also prevents a clock adjustment from extending the run.
+        single.probeDeadlineMs = Date().timeIntervalSince1970 * 1000 + 3000
+        var steps: [JSONValue] = []
+        var taps = 0
+        func reply(_ state: String, _ reason: String) -> ([String: JSONValue]?, JSONRPCError?) {
+            return (["state": .string(state), "reason": .string(reason),
+                     "taps": .int(taps), "steps": .array(steps),
+                     "elapsed_ms": .int(Int((nowMonotonic - began) * 1000))], nil)
+        }
+        for _ in 0..<6 {
+            guard nowMonotonic < end else { return reply("stopped", "run_time_limit") }
+            let (result, error) = probeGuardedTap(single, monotonicDeadline: end)
+            if error != nil { return reply("uncertain", "step_error_do_not_retry") }
+            guard let result = result, let state = result["state"]?.stringValue else {
+                return reply("uncertain", "missing_step_result")
+            }
+            steps.append(.object(result))
+            guard state == "tapped" else {
+                return reply(state, result["reason"]?.stringValue ?? "step_stopped")
+            }
+            taps += 1
+        }
+        return reply("stopped", "run_count_limit")
     }
 
