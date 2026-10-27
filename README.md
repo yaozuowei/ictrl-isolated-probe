@@ -1,2 +1,13 @@
-# ictrl-isolated-probe
-Isolated iCTRL experimental build. Public upstream only; no device credentials or user configuration.
+# iCTRL 独立云构建准备
+
+状态：尚未提交云端、尚未编译。这里只是隔离基线构建，**不包含 guarded_tap，不可当作提速完成版**。
+
+将本目录内容作为公开 GitHub 仓库根目录（仅这些文件），手动运行 Actions。标准 macOS runner；私有仓库自动跳过；30 分钟上限；产物保留一天；不需要 Apple ID、证书或手机密钥。上游固定提交，构建时只下载上游公开依赖。
+
+隔离：Bundle 前缀 `org.houchang.ictrlprobe`、端口 `18201`、URL scheme `hc-ictrl-probe` / `hc-ictrl-probe-app`，以及独立密钥存储服务与 Bonjour 标识。包标识检查通过仍不等于真机可并存；iLoader 重签后的身份和安装提示仍须检查，不接受撤销原证书/替换原服务的操作。
+
+本目录不得放入候场代码、配置、账号、配对数据或证书。第一步用它检查免费构建通路和隔离包，再编写条件点击补丁并做独立审核及真机隔离验收；未验收不连接现有候场程序。
+
+隔离基线不打包上游 CLI/Python 客户端和操作指南，它们默认使用原服务的端口/凭据目录；对应下载入口不可用。后续测试客户端必须使用独立凭据文件、显式 Probe 端口，不覆盖手机 `/root/.ictrl`。
+
+独立安装与同时运行是两项验收：不同 Bundle ID 不保证两个 XCTest 服务同时运行互不影响；未完成隔离测试前不启动现有候场购票任务。
