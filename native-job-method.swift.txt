@@ -1,0 +1,63 @@
+    private func nativeJobCall(_ method: String, _ params: [String: JSONValue]) -> ([String: JSONValue]?, JSONRPCError?) {
+        let allowed: Set<String> = ["launch_app", "open_url", "page_source", "screenshot", "find_element", "tap", "page"]
+        guard probeNativeJob.canAct else { return (nil, .serverError("Task stopped or expired")) }
+        guard allowed.contains(method) else { return (nil, .serverError("Native test method not permitted")) }
+        let bundle = probeNativeJob.bundle
+        if method == "launch_app" {
+            guard params["bundle_id"]?.stringValue == bundle else { return (nil, .invalidParams) }
+        } else if method == "open_url" {
+            guard !probeNativeJob.openURL.isEmpty, params["url"]?.stringValue == probeNativeJob.openURL else { return (nil, .invalidParams) }
+        } else {
+            guard resolveForegroundBundleId() == bundle else { return (nil, .serverError("Target app is not in front; task stopped")) }
+            if let requested = params["bundle_id"]?.stringValue, requested != bundle { return (nil, .invalidParams) }
+        }
+        func forbidden(_ label: String) -> Bool {
+            return ["提交", "下单", "支付", "付款", "预约", "继续尝试"].contains { label.contains($0) }
+        }
+        if method == "find_element", let label = params["element_id"]?.stringValue, forbidden(label) {
+            return (nil, .serverError("Submission/payment target prohibited in confirm-only test"))
+        }
+        if method == "tap" || method == "page" {
+            if systemAlertUp(precise: true) { return (nil, .serverError("System alert; no action performed")) }
+            guard let root = ForegroundApp.boundedSnapshot(forBundleID: bundle, maxDepth: 60, maxChildren: 1000) else {
+                return (nil, .serverError("No complete current snapshot"))
+            }
+            var count = 0
+            var truncated: ObjCBool = false
+            guard let body = ForegroundApp.renderBoundedSnapshot(root, maxDepth: 60, maxElements: 4000,
+                    visibleRect: .null, nodesWritten: &count, truncated: &truncated),
+                  !truncated.boolValue, count > 0, !Self.childCapHit(body, cap: 1000),
+                  !body.split(separator: "\n").contains(where: { $0.prefix(while: { $0 == " " }).count >= 120 }),
+                  !["待支付", "待付款", "立即支付", "确认付款", "验证码", "完成验证", "操作过于频繁", "滑块"].contains(where: { body.contains($0) }) else {
+                return (nil, .serverError("Screen changed to payment/challenge or could not be fully read; no action"))
+            }
+            if method == "tap" {
+                guard params["x"] == nil, params["y"] == nil,
+                      let ref = params["ref"]?.stringValue, let label = nativeJobRefs[ref],
+                      !label.isEmpty, !forbidden(label), body.contains("label: '" + label + "'") else {
+                    return (nil, .serverError("Only a previously inspected, permitted live ref can be tapped"))
+                }
+                let viewport = CGRect(x: 0, y: 0, width: pointSize.width, height: pointSize.height)
+                guard let located = ForegroundApp.locate(inBoundedSnapshot: root, query: label,
+                    contains: false, types: Self.typeFilterRaws(nativeJobRefTypes[ref]), viewport: viewport,
+                    maxDepth: 60) as? [String: Any], let candidates = located["candidates"] as? [[String: Any]],
+                    candidates.count == 1, let target = LocateHit(candidates[0]), target.inView,
+                    target.label == label, target.frame.width > 0, target.frame.height > 0,
+                    viewport.contains(target.frame), !systemAlertUp(precise: true),
+                    resolveForegroundBundleId() == bundle, probeNativeJob.canAct else {
+                    return (nil, .serverError("Tap target or foreground changed; no action"))
+                }
+                // Direct single synthesis: do not fall back to another touch on failure.
+                return fastHandler.fastTap(x: Double(target.frame.midX), y: Double(target.frame.midY))
+            }
+        }
+        guard probeNativeJob.canAct else { return (nil, .serverError("Task stopped or expired before action")) }
+        let result = dispatch(method: method, params: params, fromNativeJob: true)
+        if method == "find_element", let label = params["element_id"]?.stringValue,
+           let ref = result.0?["ref"]?.stringValue, !forbidden(label) {
+            nativeJobRefs[ref] = label
+            nativeJobRefTypes[ref] = params["element_type"]?.stringValue
+        }
+        return result
+    }
+
