@@ -1,0 +1,36 @@
+name: Isolated iCTRL baseline (not guarded-tap yet)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    if: github.event.repository.private == false
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: OpenMinis/iCTRL
+          ref: c1e4268859ba858d1579f7b846a56cb40641b7f6
+          path: upstream
+          persist-credentials: false
+      - name: Prepare separate app identity
+        run: python3 isolate.py upstream
+      - name: Build ad-hoc package without Apple credentials
+        working-directory: upstream
+        run: |
+          brew install xcodegen
+          xcodebuild -version
+          make ipa UNSIGNED=1
+      - name: Verify isolated package identifiers
+        run: python3 verify_ipa.py upstream/release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ictrl-probe-baseline-not-for-performance-testing
+          path: upstream/release/*.ipa
+          retention-days: 1
+          if-no-files-found: error
