@@ -10,7 +10,25 @@ final class ProbePanel: NSObject, WKNavigationDelegate, WKScriptMessageHandlerWi
     private var retryButton: UIButton?
     private let url = URL(string: "http://127.0.0.1:18201/local-app")!
 
-    init(call: @escaping Call) { self.call = call; super.init() }
+    init(call: @escaping Call) {
+        self.call = call
+        super.init()
+        // Bootstrap may have backgrounded the Runner before its window existed.
+        // Observe activation only to show UI; never restart a task or bootstrap.
+        NotificationCenter.default.addObserver(self, selector: #selector(showWhenActive),
+            name: UIApplication.didBecomeActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(showWhenActive),
+            name: UIScene.didActivateNotification, object: nil)
+    }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    @objc private func showWhenActive() {
+        DispatchQueue.main.async { [weak self] in
+            guard !ProbeNativeJob.isBusy else { return }
+            self?.show()
+        }
+    }
 
     func show() {
         precondition(Thread.isMainThread)

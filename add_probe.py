@@ -43,7 +43,7 @@ replace('iCTRLUITests/ActionHandler.swift', '    func dispatch(method: String, p
             return (nil, .serverError("Native test is active; cancel it before other UI operations"))
         }''')
 replace('iCTRLUITests/iCTRLUITests.swift', '        backgroundSelfNow()\n',
-        '        DispatchQueue.main.async { [weak self] in self?.actionHandler?.showNativePanel() }\n')
+        '        DispatchQueue.main.async { [weak self] in self?.actionHandler?.showNativePanel(activate: true) }\n')
 native_method = (Path(__file__).parent / 'native-job-method.swift.txt').read_text(encoding='utf-8')
 replace('iCTRLUITests/ActionHandler.swift', '    private func tap(_ cmd: ActionCommand)', native_method + '    private func tap(_ cmd: ActionCommand)')
 
