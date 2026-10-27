@@ -10,12 +10,23 @@ def replace(relative, old, new):
     path.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
 
 (root / 'iCTRLUITests/ProbeNativeJob.swift').write_text((Path(__file__).parent / 'ProbeNativeJob.swift').read_text(encoding='utf-8'), encoding='utf-8')
+(root / 'iCTRLUITests/ProbePanel.swift').write_text((Path(__file__).parent / 'ProbePanel.swift').read_text(encoding='utf-8'), encoding='utf-8')
 replace('iCTRLUITests/ActionHandler.swift', '    func dispatch(method: String, params: [String: JSONValue]?) -> ([String: JSONValue]?, JSONRPCError?) {', '''    private var nativeJobRefs: [String: String] = [:]
     private var nativeJobRefTypes: [String: String] = [:]
-    private lazy var probeNativeJob = ProbeNativeJob(showPanel: { [weak self] in
-        _ = ObjCException.catching {
-            _ = self?.dispatch(method: "open_url", params: ["url": .string("http://127.0.0.1:18201/local-app")])
+    private lazy var nativePanel = ProbePanel { [weak self] method, params in
+        guard let self = self else { return (nil, .internalError) }
+        return self.dispatch(method: method, params: params)
+    }
+    func showNativePanel(activate: Bool = false) {
+        nativePanel.show()
+        if activate {
+            _ = ObjCException.catching {
+                _ = self.dispatch(method: "open_url", params: ["url": .string("hc-ictrl-probe://")])
+            }
         }
+    }
+    private lazy var probeNativeJob = ProbeNativeJob(showPanel: { [weak self] in
+        self?.showNativePanel(activate: true)
     }) { [weak self] method, params in
         guard let self = self else { return (nil, .internalError) }
         return self.nativeJobCall(method, params)
@@ -24,11 +35,15 @@ replace('iCTRLUITests/ActionHandler.swift', '    func dispatch(method: String, p
     func dispatch(method: String, params: [String: JSONValue]?, fromNativeJob: Bool = false) -> ([String: JSONValue]?, JSONRPCError?) {
         if ["native_job_start", "native_job_status", "native_job_cancel", "native_app_install", "native_app_page"].contains(method) {
             if method == "native_job_start" && !probeNativeJob.active { nativeJobRefs.removeAll(); nativeJobRefTypes.removeAll() }
-            return probeNativeJob.handle(method, params ?? [:])
+            let result = probeNativeJob.handle(method, params ?? [:])
+            if method == "native_app_install" && result.1 == nil { nativePanel.reload() }
+            return result
         }
         if ProbeNativeJob.isBusy && !fromNativeJob {
             return (nil, .serverError("Native test is active; cancel it before other UI operations"))
         }''')
+replace('iCTRLUITests/iCTRLUITests.swift', '        backgroundSelfNow()\n',
+        '        DispatchQueue.main.async { [weak self] in self?.actionHandler?.showNativePanel() }\n')
 native_method = (Path(__file__).parent / 'native-job-method.swift.txt').read_text(encoding='utf-8')
 replace('iCTRLUITests/ActionHandler.swift', '    private func tap(_ cmd: ActionCommand)', native_method + '    private func tap(_ cmd: ActionCommand)')
 
