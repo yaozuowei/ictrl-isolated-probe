@@ -12,7 +12,10 @@
             if let requested = params["bundle_id"]?.stringValue, requested != bundle { return (nil, .invalidParams) }
         }
         func forbidden(_ label: String) -> Bool {
-            return ["提交", "下单", "支付", "付款", "预约", "继续尝试"].contains { label.contains($0) }
+            if ["提交", "下单", "支付", "付款", "继续尝试"].contains(where: { label.contains($0) }) { return true }
+            // Browsing reservation choices is allowed; submitting a reservation is not.
+            let datedChoice = label.range(of: #"^\d{4}-\d{2}-\d{2}.*\d{2}:\d{2} 可预约$"#, options: .regularExpression) != nil
+            return label.contains("预约") && label != "预约抢票" && !datedChoice
         }
         if method == "find_element", let label = params["element_id"]?.stringValue, forbidden(label) {
             return (nil, .serverError("Submission/payment target prohibited in confirm-only test"))

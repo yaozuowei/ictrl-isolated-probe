@@ -19,12 +19,13 @@ final class ProbeNativeJob {
     private var context: JSContext?
     private var input = "{}"
     private var began = 0.0
+    private var runtimeSeconds = 240.0
     private var generation = 0
     private var inFlight = false { didSet { refreshBusy(); returnWhenIdle() } }
     private var rgba: [UInt8] = []
     private let file: URL
     private(set) var active = false { didSet { refreshBusy() } }
-    var canAct: Bool { active && ProcessInfo.processInfo.systemUptime - began < 240 }
+    var canAct: Bool { active && ProcessInfo.processInfo.systemUptime - began < runtimeSeconds }
     private(set) var bundle = ""
     private(set) var openURL = ""
     private var state: [String: JSONValue] = [:]
@@ -110,7 +111,11 @@ final class ProbeNativeJob {
                 return (["installed": .bool(true)], nil)
             } catch { return (nil, .serverError("Could not save local app")) }
         }
-        if method == "native_job_status" { return (state, nil) }
+        if method == "native_job_status" {
+            var status = state
+            status["native_runtime_max_seconds"] = .int(86400)
+            return (status, nil)
+        }
         if method == "native_job_cancel" {
             guard params["run_id"] == state["run_id"] else { return (nil, .invalidParams) }
             if active { finish("stopped", "Stopped by user; no more actions scheduled") }
@@ -122,13 +127,16 @@ final class ProbeNativeJob {
               let bid = params["bundle_id"]?.stringValue, !bid.isEmpty,
               case .object(let config)? = params["config"], config["stopAt"]?.stringValue == "confirm",
               let js = JSContext() else { return (nil, .invalidParams) }
+        let requestedRuntime = params["runtime_seconds"]?.doubleValue ?? 240
+        guard requestedRuntime.isFinite, requestedRuntime >= 60, requestedRuntime <= 86400 else { return (nil, .invalidParams) }
+        runtimeSeconds = requestedRuntime
         bundle = bid
         openURL = params["open_url"]?.stringValue ?? ""
         returnToPanel = params["return_to_panel"]?.boolValue == true
         began = ProcessInfo.processInfo.systemUptime
         generation += 1
         usedIDs.append(id); usedIDs = Array(usedIDs.suffix(40))
-        state = ["run_id": .string(id), "phase": .string("starting"), "steps": .int(0)]
+        state = ["run_id": .string(id), "phase": .string("starting"), "steps": .int(0), "runtime_seconds": .double(runtimeSeconds)]
         active = true
         guard persist() else { finish("failed", "Cannot persist task identity; no action started"); return (state, nil) }
         context = js
