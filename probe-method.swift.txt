@@ -1,0 +1,68 @@
+    /// Experimental, Safari-only single action. Never schedules a touch sequence.
+    private func probeGuardedTap(_ cmd: ActionCommand) -> ([String: JSONValue]?, JSONRPCError?) {
+        let began = nowMonotonic
+        func reply(_ state: String, _ reason: String) -> ([String: JSONValue]?, JSONRPCError?) {
+            return (["state": .string(state), "reason": .string(reason),
+                     "elapsed_ms": .int(Int((nowMonotonic - began) * 1000))], nil)
+        }
+        guard let nonce = cmd.text, nonce.count == 16,
+              nonce.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }),
+              let deadline = cmd.probeDeadlineMs, deadline.isFinite else {
+            return reply("stopped", "invalid_request")
+        }
+        func deadlineValid() -> Bool {
+            let remaining = deadline - Date().timeIntervalSince1970 * 1000
+            return remaining > 0 && remaining <= 5000
+        }
+        let bid = "com.apple.mobilesafari"
+        guard deadlineValid(), resolveForegroundBundleId() == bid else {
+            return reply("stopped", "expired_or_wrong_app")
+        }
+        if systemAlertUp(precise: true) { return reply("stopped", "system_alert") }
+        if let err = Self.snapshotPrecheck(bundleId: bid, action: "probe snapshot", retryWith: "page_source") {
+            return (nil, err)
+        }
+        guard let root = ForegroundApp.boundedSnapshot(forBundleID: bid, maxDepth: 60, maxChildren: 1000) else {
+            return reply("stopped", "snapshot_unavailable")
+        }
+        var count = 0
+        var truncated: ObjCBool = false
+        guard let body = ForegroundApp.renderBoundedSnapshot(root, maxDepth: 60, maxElements: 4000,
+                visibleRect: .null, nodesWritten: &count, truncated: &truncated),
+              !truncated.boolValue, count > 0, !Self.childCapHit(body, cap: 1000),
+              !body.split(separator: "\n").contains(where: { $0.prefix(while: { $0 == " " }).count >= 120 }) else {
+            return reply("stopped", "snapshot_incomplete")
+        }
+        // Stop has priority even if the old button remains visible and enabled.
+        let stopWords = ["HC Probe Stop", "待支付", "待付款", "立即支付", "确认付款", "验证码", "完成验证"]
+        guard !stopWords.contains(where: { body.contains($0) }) else {
+            return reply("stopped", "stop_marker")
+        }
+        guard body.contains("label: 'HC Isolated Probe'"),
+              body.contains("label: 'HC Probe " + nonce + "'"),
+              body.contains("label: 'HC Probe Allow'") else {
+            return reply("stopped", "probe_markers_missing")
+        }
+        let viewport = CGRect(x: 0, y: 0, width: pointSize.width, height: pointSize.height)
+        guard let located = ForegroundApp.locate(inBoundedSnapshot: root, query: "HC Probe Tap",
+                contains: false, types: Self.typeFilterRaws("button"), viewport: viewport,
+                maxDepth: 60) as? [String: Any],
+              let raw = located["candidates"] as? [[String: Any]], raw.count == 1,
+              let target = LocateHit(raw[0]), target.inView, target.label == "HC Probe Tap",
+              target.frame.width > 0, target.frame.height > 0, viewport.contains(target.frame) else {
+            return reply("stopped", "target_unavailable_or_ambiguous")
+        }
+        if systemAlertUp(precise: true) { return reply("stopped", "system_alert") }
+        guard resolveForegroundBundleId() == bid, deadlineValid() else {
+            return reply("stopped", "expired_or_app_changed")
+        }
+        let beforeTouch = nowMonotonic
+        // No fallback: an error may follow a delivered touch and must not retry.
+        let action = fastHandler.fastTap(x: Double(target.frame.midX), y: Double(target.frame.midY))
+        if action.1 != nil { return reply("uncertain", "touch_error_do_not_retry") }
+        return (["state": .string("tapped"),
+                 "check_ms": .int(Int((beforeTouch - began) * 1000)),
+                 "touch_ms": .int(Int((nowMonotonic - beforeTouch) * 1000)),
+                 "elapsed_ms": .int(Int((nowMonotonic - began) * 1000))], nil)
+    }
+
