@@ -12,13 +12,17 @@ def replace(relative, old, new):
 (root / 'iCTRLUITests/ProbeNativeJob.swift').write_text((Path(__file__).parent / 'ProbeNativeJob.swift').read_text(encoding='utf-8'), encoding='utf-8')
 replace('iCTRLUITests/ActionHandler.swift', '    func dispatch(method: String, params: [String: JSONValue]?) -> ([String: JSONValue]?, JSONRPCError?) {', '''    private var nativeJobRefs: [String: String] = [:]
     private var nativeJobRefTypes: [String: String] = [:]
-    private lazy var probeNativeJob = ProbeNativeJob { [weak self] method, params in
+    private lazy var probeNativeJob = ProbeNativeJob(showPanel: { [weak self] in
+        _ = ObjCException.catching {
+            _ = self?.dispatch(method: "open_url", params: ["url": .string("http://127.0.0.1:18201/local-app")])
+        }
+    }) { [weak self] method, params in
         guard let self = self else { return (nil, .internalError) }
         return self.nativeJobCall(method, params)
     }
 
     func dispatch(method: String, params: [String: JSONValue]?, fromNativeJob: Bool = false) -> ([String: JSONValue]?, JSONRPCError?) {
-        if ["native_job_start", "native_job_status", "native_job_cancel"].contains(method) {
+        if ["native_job_start", "native_job_status", "native_job_cancel", "native_app_install", "native_app_page"].contains(method) {
             if method == "native_job_start" && !probeNativeJob.active { nativeJobRefs.removeAll(); nativeJobRefTypes.removeAll() }
             return probeNativeJob.handle(method, params ?? [:])
         }
@@ -52,7 +56,7 @@ replace('iCTRLUITests/ActionHandler.swift', '    private func tap(_ cmd: ActionC
 replace('iCTRLUITests/iCTRLUITests.swift', 'private static let mainThreadMethods: Set<String> = [', 'private static let mainThreadMethods: Set<String> = [\n        "probe_guarded_tap", "probe_guarded_run", "native_job_start", "native_job_status", "native_job_cancel",')
 replace('iCTRLKit/JSONRPCServer.swift', 'private static let uiMutatingMethods: Set<String> = [', 'private static let uiMutatingMethods: Set<String> = [\n        "probe_guarded_tap", "probe_guarded_run", "native_job_start", "native_job_cancel",')
 schema = '''
-        RPCMethodDef(name: "native_job_start", description: "Experimental trusted local generator task. Confirm-only, no submission/payment targets. Scripts are supplied locally, not bundled. One task, 240-second runtime cap. Never retry a timed-out start; query status with the same run id. In-flight OS actions cannot be cancelled.", params: [RPCParamDef(name: "run_id", type: "string", required: true, description: "Unique request identity; do not reuse"), RPCParamDef(name: "source", type: "string", required: true, description: "Trusted local generator source"), RPCParamDef(name: "config", type: "object", required: true, description: "Isolated confirm-only config"), RPCParamDef(name: "bundle_id", type: "string", required: true, description: "Only app this task can inspect or control"), RPCParamDef(name: "open_url", type: "string", required: false, description: "Only exact deep link permitted")], returns: "{run_id,phase,active,report,steps}"),
+        RPCMethodDef(name: "native_job_start", description: "Experimental trusted local generator task. Confirm-only, no submission/payment targets. Scripts are supplied locally, not bundled. One task, 240-second runtime cap. Never retry a timed-out start; query status with the same run id. In-flight OS actions cannot be cancelled.", params: [RPCParamDef(name: "run_id", type: "string", required: true, description: "Unique request identity; do not reuse"), RPCParamDef(name: "source", type: "string", required: false, description: "Trusted local generator source; omitted uses installed local app"), RPCParamDef(name: "config", type: "object", required: true, description: "Isolated confirm-only config"), RPCParamDef(name: "bundle_id", type: "string", required: true, description: "Only app this task can inspect or control"), RPCParamDef(name: "open_url", type: "string", required: false, description: "Only exact deep link permitted"), RPCParamDef(name: "return_to_panel", type: "boolean", required: false, description: "Return to the localhost panel after task finishes")], returns: "{run_id,phase,active,report,steps}"),
         RPCMethodDef(name: "native_job_status", description: "Read native test status; restart interrupts without replay.", params: [], returns: "{run_id,phase,active,report,steps}"),
         RPCMethodDef(name: "native_job_cancel", description: "Stop scheduling new steps. An already dispatched OS action cannot be undone.", params: [RPCParamDef(name: "run_id", type: "string", required: true, description: "Identity of task to cancel")], returns: "{run_id,phase,active}"),
         RPCMethodDef(name: "probe_guarded_run",
@@ -66,4 +70,33 @@ schema = '''
             returns: "{state:tapped|stopped|uncertain,reason?,check_ms?,touch_ms?,elapsed_ms}"),
 '''
 replace('iCTRLKit/RPCMethod.swift', 'static let methods: [RPCMethodDef] = [\n', 'static let methods: [RPCMethodDef] = [\n' + schema)
+
+# Public cloud code serves only locally installed assets. Authentication remains the
+# existing paired/encrypted RPC protocol; GET never includes config or credentials.
+for relative, anchor in [('iCTRLUITests/ActionHandler.swift', 'private static let knownMethods: [String] = ['),
+                         ('iCTRLUITests/iCTRLUITests.swift', 'private static let mainThreadMethods: Set<String> = [')]:
+    replace(relative, anchor, anchor + '\n        "native_app_install", "native_app_page",')
+replace('iCTRLKit/JSONRPCServer.swift', 'private static let uiMutatingMethods: Set<String> = [',
+        'private static let uiMutatingMethods: Set<String> = [\n        "native_app_install",')
+replace('iCTRLKit/JSONRPCServer.swift', '        case ("GET", "/schema"):', '''        case ("GET", "/local-app"):
+            guard isLoopback(connection), headers["host"] == "127.0.0.1:18201" else {
+                return sendHTTPResponse(connection: connection, status: 403, body: "Phone localhost only", cors: false)
+            }
+            guard let handler = onRPCRequest else {
+                return sendHTTPResponse(connection: connection, status: 500, body: "Runner not ready", cors: false)
+            }
+            handler("native_app_page", [:]) { [weak self] result, error in
+                guard let self = self else { return }
+                self.queue.async {
+                    self.sendHTTPResponse(connection: connection, status: error == nil ? 200 : 404,
+                        headers: ["Cache-Control": "no-store", "X-Frame-Options": "DENY",
+                                  "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"],
+                        contentType: "text/html; charset=utf-8", body: result?["html"]?.stringValue ?? "Local app not installed", cors: false)
+                }
+            }
+
+        case ("GET", "/schema"):''')
+replace('iCTRLKit/RPCMethod.swift', 'static let methods: [RPCMethodDef] = [\n', '''static let methods: [RPCMethodDef] = [
+        RPCMethodDef(name: "native_app_install", description: "Install trusted local HTML and generator source into the isolated Probe container. No secrets in HTML. Requires existing pairing; task must be idle.", params: [RPCParamDef(name: "html", type: "string", required: true, description: "Local UI document, under 250 KB"), RPCParamDef(name: "source", type: "string", required: true, description: "Trusted generator, under 200 KB")], returns: "{installed}"),
+''')
 print('Experimental probe_guarded_tap/run added; no production automation enabled.')

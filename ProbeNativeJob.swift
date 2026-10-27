@@ -13,11 +13,14 @@ final class ProbeNativeJob {
     }
     typealias Call = (String, [String: JSONValue]) -> ([String: JSONValue]?, JSONRPCError?)
     private let call: Call
+    private let showPanel: () -> Void
+    private var returnToPanel = false
+    private let appFile: URL
     private var context: JSContext?
     private var input = "{}"
     private var began = 0.0
     private var generation = 0
-    private var inFlight = false { didSet { refreshBusy() } }
+    private var inFlight = false { didSet { refreshBusy(); returnWhenIdle() } }
     private var rgba: [UInt8] = []
     private let file: URL
     private(set) var active = false { didSet { refreshBusy() } }
@@ -37,12 +40,14 @@ final class ProbeNativeJob {
         Self.busy = false
     }
 
-    init(call: @escaping Call) {
+    init(showPanel: @escaping () -> Void, call: @escaping Call) {
         self.call = call
+        self.showPanel = showPanel
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("NativeProbe", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         file = base.appendingPathComponent("status.json")
+        appFile = base.appendingPathComponent("local-app.json")
         if let data = try? Data(contentsOf: file),
            let saved = try? JSONDecoder().decode([String: JSONValue].self, from: data) {
             state = saved
@@ -75,10 +80,36 @@ final class ProbeNativeJob {
         context = nil
         rgba = []
         persist()
+        returnWhenIdle()
+    }
+
+    // A cancelled OS action may still be on the stack. Return only once it is
+    // done, and never let the old task interrupt a newly started task.
+    private func returnWhenIdle() {
+        guard returnToPanel && !active && !inFlight else { return }
+        returnToPanel = false
+        let expected = generation
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.generation == expected, !self.active, !self.inFlight else { return }
+            self.showPanel()
+        }
     }
 
     func handle(_ method: String, _ params: [String: JSONValue]) -> ([String: JSONValue]?, JSONRPCError?) {
         precondition(Thread.isMainThread)
+        if method == "native_app_page" {
+            guard let app = readApp(), let html = app["html"] else { return (nil, .serverError("Local app not installed")) }
+            return (["html": html], nil)
+        }
+        if method == "native_app_install" {
+            guard !active && !inFlight, let html = params["html"]?.stringValue, html.utf8.count < 250_000,
+                  let source = params["source"]?.stringValue, source.utf8.count < 200_000 else { return (nil, .invalidParams) }
+            do {
+                let data = try JSONEncoder().encode(["html": JSONValue.string(html), "source": .string(source)])
+                try data.write(to: appFile, options: .atomic)
+                return (["installed": .bool(true)], nil)
+            } catch { return (nil, .serverError("Could not save local app")) }
+        }
         if method == "native_job_status" { return (state, nil) }
         if method == "native_job_cancel" {
             guard params["run_id"] == state["run_id"] else { return (nil, .invalidParams) }
@@ -87,12 +118,13 @@ final class ProbeNativeJob {
         }
         guard !active && !inFlight else { return (nil, .serverError("A native task or action is still active")) }
         guard let id = params["run_id"]?.stringValue, id.count >= 16, id.count <= 100,
-              !usedIDs.contains(id), let source = params["source"]?.stringValue, source.utf8.count < 200_000,
+              !usedIDs.contains(id), let source = params["source"]?.stringValue ?? readApp()?["source"]?.stringValue, source.utf8.count < 200_000,
               let bid = params["bundle_id"]?.stringValue, !bid.isEmpty,
               case .object(let config)? = params["config"], config["stopAt"]?.stringValue == "confirm",
               let js = JSContext() else { return (nil, .invalidParams) }
         bundle = bid
         openURL = params["open_url"]?.stringValue ?? ""
+        returnToPanel = params["return_to_panel"]?.boolValue == true
         began = ProcessInfo.processInfo.systemUptime
         generation += 1
         usedIDs.append(id); usedIDs = Array(usedIDs.suffix(40))
@@ -151,6 +183,11 @@ final class ProbeNativeJob {
             guard let self = self, self.active, self.generation == expected else { return }
             self.tick()
         }
+    }
+
+    private func readApp() -> [String: JSONValue]? {
+        guard let data = try? Data(contentsOf: appFile) else { return nil }
+        return try? JSONDecoder().decode([String: JSONValue].self, from: data)
     }
 
     private func tick() {
